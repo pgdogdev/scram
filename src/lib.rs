@@ -2,7 +2,8 @@
 //!
 //! This implementation currently provides a client and a server for the SCRAM-SHA-256 mechanism
 //! according to [RFC5802](https://tools.ietf.org/html/rfc5802) and
-//! [RFC7677](https://tools.ietf.org/html/rfc7677). It doesn't support channel-binding.
+//! [RFC7677](https://tools.ietf.org/html/rfc7677). The server implementation supports
+//! channel-binding for enhanced security over TLS connections.
 //!
 //! # Usage
 //!
@@ -127,6 +128,40 @@
 //! // Check if the client successfully authenticated
 //! assert_eq!(status, AuthenticationStatus::Authenticated);
 //! ```
+//!
+//! ## Channel Binding
+//!
+//! The server can be configured to use channel binding for enhanced security. Channel binding
+//! cryptographically binds the SCRAM authentication to the underlying TLS connection, preventing
+//! man-in-the-middle attacks. Common channel binding types include:
+//!
+//! - `tls-unique`: Uses the TLS Finished message
+//! - `tls-server-end-point`: Uses the server's TLS certificate
+//! - `tls-exporter`: Uses the TLS exporter functionality (RFC 5705)
+//!
+//! To use channel binding, create the server with [`ScramServer::new_with_channel_binding`]:
+//!
+//! ```rust,no_run
+//! use scram::{ScramServer, AuthenticationProvider, PasswordInfo};
+//!
+//! struct ExampleProvider;
+//! impl AuthenticationProvider for ExampleProvider {
+//!     fn get_password_for(&self, username: &str) -> Option<PasswordInfo> {
+//!        unimplemented!()
+//!     }
+//! }
+//!
+//! // Get channel binding data from your TLS implementation
+//! let cb_type = "tls-unique".to_string();
+//! let cb_data = vec![0x12, 0x34, 0x56]; // From TLS connection
+//!
+//! // Create server with channel binding
+//! let scram_server = ScramServer::new_with_channel_binding(
+//!     ExampleProvider{},
+//!     cb_type,
+//!     cb_data
+//! );
+//! ```
 extern crate base64;
 extern crate rand;
 extern crate ring;
@@ -142,5 +177,7 @@ pub mod server;
 
 pub use client::ScramClient;
 pub use error::{Error, Field, Kind};
-pub use server::{AuthenticationProvider, AuthenticationStatus, PasswordInfo, ScramServer};
+pub use server::{
+    AuthenticationProvider, AuthenticationStatus, ChannelBinding, PasswordInfo, ScramServer,
+};
 pub use utils::hash_password;

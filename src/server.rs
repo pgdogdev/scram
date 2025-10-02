@@ -10,11 +10,25 @@ use error::{Error, Field, Kind};
 use utils::find_proofs;
 use NONCE_LENGTH;
 
+/// Represents channel binding information from a client
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChannelBinding {
+    /// Client doesn't support channel binding (GS2 header: "n")
+    None,
+    /// Client supports channel binding but server doesn't (GS2 header: "y")
+    NotUsed,
+    /// Channel binding is being used with the specified type and data
+    /// Common types: "tls-unique", "tls-server-end-point", "tls-exporter"
+    Used(String, Vec<u8>),
+}
+
 /// Responds to client authentication challenges. It's the entrypoint for the SCRAM server side
 /// implementation.
 pub struct ScramServer<P: AuthenticationProvider> {
     /// The ['AuthenticationProvider'] that will find passwords and check authorization.
     provider: P,
+    /// The expected channel binding data for this connection
+    channel_binding: Option<(String, Vec<u8>)>,
 }
 
 /// Contains information about stored passwords. In particular, it stores the password that has been
@@ -69,16 +83,26 @@ pub trait AuthenticationProvider {
 
 /// Parses a client's first message by splitting it on commas and analyzing each part. Gives an
 /// error if the data was malformed in any way
-fn parse_client_first(data: &str) -> Result<(&str, Option<&str>, &str), Error> {
+fn parse_client_first(data: &str) -> Result<(&str, Option<&str>, &str, ChannelBinding), Error> {
     let mut parts = data.split(',');
 
     // Channel binding
-    if let Some(part) = parts.next() {
+    let channel_binding = if let Some(part) = parts.next() {
         if let Some(cb) = part.chars().next() {
             if cb == 'p' {
-                return Err(Error::UnsupportedExtension);
-            }
-            if cb != 'n' && cb != 'y' || part.len() > 1 {
+                // Client wants to use channel binding: p=<cb-name>
+                if part.len() < 3 || &part.as_bytes()[1..2] != b"=" {
+                    return Err(Error::Protocol(Kind::InvalidField(Field::ChannelBinding)));
+                }
+                let cb_name = &part[2..];
+                ChannelBinding::Used(cb_name.to_string(), Vec::new())
+            } else if cb == 'n' && part.len() == 1 {
+                // Client doesn't support channel binding
+                ChannelBinding::None
+            } else if cb == 'y' && part.len() == 1 {
+                // Client supports but not using channel binding
+                ChannelBinding::NotUsed
+            } else {
                 return Err(Error::Protocol(Kind::InvalidField(Field::ChannelBinding)));
             }
         } else {
@@ -86,7 +110,7 @@ fn parse_client_first(data: &str) -> Result<(&str, Option<&str>, &str), Error> {
         }
     } else {
         return Err(Error::Protocol(Kind::ExpectedField(Field::ChannelBinding)));
-    }
+    };
 
     // Authzid
     let authzid = if let Some(part) = parts.next() {
@@ -111,7 +135,7 @@ fn parse_client_first(data: &str) -> Result<(&str, Option<&str>, &str), Error> {
             return Err(Error::Protocol(Kind::ExpectedField(Field::Nonce)));
         }
     };
-    Ok((authcid, authzid, nonce))
+    Ok((authcid, authzid, nonce, channel_binding))
 }
 
 /// Parses the client's final message. Gives an error if the data was malformed.
@@ -127,7 +151,20 @@ fn parse_client_final(data: &str) -> Result<(&str, &str, &str), Error> {
 impl<P: AuthenticationProvider> ScramServer<P> {
     /// Creates a new `ScramServer` using the given authentication provider.
     pub fn new(provider: P) -> Self {
-        ScramServer { provider }
+        ScramServer {
+            provider,
+            channel_binding: None,
+        }
+    }
+
+    /// Creates a new `ScramServer` with channel binding support. The channel binding type
+    /// (e.g., "tls-unique", "tls-server-end-point") and the channel binding data must be provided.
+    /// The server will validate that the client provides matching channel binding information.
+    pub fn new_with_channel_binding(provider: P, cb_type: String, cb_data: Vec<u8>) -> Self {
+        ScramServer {
+            provider,
+            channel_binding: Some((cb_type, cb_data)),
+        }
     }
 
     /// Handle a challenge message sent by the client to the server. If the message is well formed,
@@ -137,7 +174,32 @@ impl<P: AuthenticationProvider> ScramServer<P> {
         &'a self,
         client_first: &'a str,
     ) -> Result<ServerFirst<'a, P>, Error> {
-        let (authcid, authzid, client_nonce) = parse_client_first(client_first)?;
+        let (authcid, authzid, client_nonce, client_cb) = parse_client_first(client_first)?;
+
+        // Validate channel binding negotiation
+        match (&self.channel_binding, &client_cb) {
+            // Server has channel binding, client must use it
+            (Some((cb_type, _)), ChannelBinding::Used(client_cb_type, _)) => {
+                if cb_type != client_cb_type {
+                    return Err(Error::Protocol(Kind::InvalidField(Field::ChannelBinding)));
+                }
+            }
+            // Server has channel binding but client doesn't support it - reject
+            (Some(_), ChannelBinding::None) => {
+                return Err(Error::Protocol(Kind::InvalidField(Field::ChannelBinding)));
+            }
+            // Server has channel binding but client chose not to use it - allow but not ideal
+            (Some(_), ChannelBinding::NotUsed) => {
+                // This is allowed by the spec but indicates client supports CB but chose not to use it
+            }
+            // Server doesn't have channel binding, client wants it - reject
+            (None, ChannelBinding::Used(_, _)) => {
+                return Err(Error::UnsupportedExtension);
+            }
+            // Server doesn't have channel binding, client doesn't either - OK
+            (None, ChannelBinding::None) | (None, ChannelBinding::NotUsed) => {}
+        }
+
         let password_info = self
             .provider
             .get_password_for(authcid)
@@ -148,6 +210,8 @@ impl<P: AuthenticationProvider> ScramServer<P> {
             authzid,
             provider: &self.provider,
             password_info,
+            client_channel_binding: client_cb,
+            server_channel_binding: self.channel_binding.as_ref(),
         })
     }
 }
@@ -160,6 +224,8 @@ pub struct ServerFirst<'a, P: 'a + AuthenticationProvider> {
     authzid: Option<&'a str>,
     provider: &'a P,
     password_info: PasswordInfo,
+    client_channel_binding: ChannelBinding,
+    server_channel_binding: Option<&'a (String, Vec<u8>)>,
 }
 
 impl<'a, P: AuthenticationProvider> ServerFirst<'a, P> {
@@ -186,10 +252,31 @@ impl<'a, P: AuthenticationProvider> ServerFirst<'a, P> {
                 .take(NONCE_LENGTH),
         );
 
-        let gs2header: Cow<'static, str> = match self.authzid {
-            Some(authzid) => format!("n,a={},", authzid).into(),
-            None => "n,,".into(),
+        // Construct GS2 header based on channel binding state
+        let gs2header: Cow<'static, str> = match &self.client_channel_binding {
+            ChannelBinding::Used(cb_type, _) => {
+                // Client is using channel binding
+                match self.authzid {
+                    Some(authzid) => format!("p={},a={},", cb_type, authzid).into(),
+                    None => format!("p={},,", cb_type).into(),
+                }
+            }
+            ChannelBinding::NotUsed => {
+                // Client supports but not using channel binding
+                match self.authzid {
+                    Some(authzid) => format!("y,a={},", authzid).into(),
+                    None => "y,,".into(),
+                }
+            }
+            ChannelBinding::None => {
+                // Client doesn't support channel binding
+                match self.authzid {
+                    Some(authzid) => format!("n,a={},", authzid).into(),
+                    None => "n,,".into(),
+                }
+            }
         };
+
         let client_first_bare: Cow<'static, str> =
             format!("n={},r={}", self.authcid, self.client_nonce).into();
         let server_first: Cow<'static, str> = format!(
@@ -209,6 +296,7 @@ impl<'a, P: AuthenticationProvider> ServerFirst<'a, P> {
                 authcid: self.authcid,
                 authzid: self.authzid,
                 provider: self.provider,
+                server_channel_binding: self.server_channel_binding,
             },
             server_first.into_owned(),
         )
@@ -226,6 +314,7 @@ pub struct ClientFinal<'a, P: 'a + AuthenticationProvider> {
     authcid: &'a str,
     authzid: Option<&'a str>,
     provider: &'a P,
+    server_channel_binding: Option<&'a (String, Vec<u8>)>,
 }
 
 impl<'a, P: AuthenticationProvider> ClientFinal<'a, P> {
@@ -273,10 +362,53 @@ impl<'a, P: AuthenticationProvider> ClientFinal<'a, P> {
         }
     }
 
-    /// Checks that the gs2header received from the client is the same as the one we've stored
-    fn verify_header(&self, gs2header: &str) -> bool {
-        let server_gs2header = base64::encode(self.gs2header.as_bytes());
-        server_gs2header == gs2header
+    /// Checks that the gs2header received from the client is the same as the one we've stored,
+    /// and if channel binding is being used, validates the channel binding data
+    fn verify_header(&self, gs2header_b64: &str) -> bool {
+        // Decode the base64-encoded GS2 header + channel binding data from client
+        let client_cb_data = match base64::decode(gs2header_b64.as_bytes()) {
+            Ok(data) => data,
+            Err(_) => return false,
+        };
+
+        // If server has channel binding, the client must include it
+        if let Some((cb_type, server_cb_data)) = self.server_channel_binding {
+            // The client's data should be: gs2header || channel_binding_data
+            // The gs2header should be something like "p=tls-unique,,"
+            let expected_gs2_prefix = format!("p={},", cb_type);
+
+            // Check if client data starts with the expected GS2 header
+            if !client_cb_data.starts_with(expected_gs2_prefix.as_bytes()) {
+                return false;
+            }
+
+            // After "p=<cb-name>," comes either "a=<authzid>," or "n,," or just ","
+            // We need to find where the gs2header ends and the channel binding data begins
+            let gs2_end_pos = self.gs2header.len();
+
+            // Split into GS2 header part and channel binding data part
+            if client_cb_data.len() < gs2_end_pos {
+                return false;
+            }
+
+            let (client_gs2_part, client_cb_part) = client_cb_data.split_at(gs2_end_pos);
+
+            // Verify GS2 header matches
+            if client_gs2_part != self.gs2header.as_bytes() {
+                return false;
+            }
+
+            // Verify channel binding data matches what the server expects
+            if client_cb_part != server_cb_data.as_slice() {
+                return false;
+            }
+
+            true
+        } else {
+            // No channel binding - just verify the GS2 header matches
+            let server_gs2header = base64::encode(self.gs2header.as_bytes());
+            server_gs2header == gs2header_b64
+        }
     }
 
     /// Checks that the client has sent the same nonce
@@ -325,25 +457,28 @@ impl ServerFinal {
 #[cfg(test)]
 mod tests {
     use super::super::{Error, Field, Kind};
-    use super::{parse_client_final, parse_client_first};
+    use super::{parse_client_final, parse_client_first, ChannelBinding};
 
     #[test]
     fn test_parse_client_first_success() {
-        let (authcid, authzid, nonce) = parse_client_first("n,,n=user,r=abcdefghijk").unwrap();
+        let (authcid, authzid, nonce, cb) = parse_client_first("n,,n=user,r=abcdefghijk").unwrap();
         assert_eq!(authcid, "user");
         assert!(authzid.is_none());
         assert_eq!(nonce, "abcdefghijk");
+        assert_eq!(cb, ChannelBinding::None);
 
-        let (authcid, authzid, nonce) =
+        let (authcid, authzid, nonce, cb) =
             parse_client_first("y,a=other user,n=user,r=abcdef=hijk").unwrap();
         assert_eq!(authcid, "user");
         assert_eq!(authzid, Some("other user"));
         assert_eq!(nonce, "abcdef=hijk");
+        assert_eq!(cb, ChannelBinding::NotUsed);
 
-        let (authcid, authzid, nonce) = parse_client_first("n,,n=,r=").unwrap();
+        let (authcid, authzid, nonce, cb) = parse_client_first("n,,n=,r=").unwrap();
         assert_eq!(authcid, "");
         assert!(authzid.is_none());
         assert_eq!(nonce, "");
+        assert_eq!(cb, ChannelBinding::None);
     }
 
     #[test]
@@ -379,9 +514,10 @@ mod tests {
             parse_client_first("a,,n=user,r=abc").unwrap_err(),
             Error::Protocol(Kind::InvalidField(Field::ChannelBinding))
         );
+        // "p,," is invalid - should be "p=<cb-name>"
         assert_eq!(
             parse_client_first("p,,n=user,r=abc").unwrap_err(),
-            Error::UnsupportedExtension
+            Error::Protocol(Kind::InvalidField(Field::ChannelBinding))
         );
         assert_eq!(
             parse_client_first("nn,,n=user,r=abc").unwrap_err(),
@@ -390,6 +526,31 @@ mod tests {
         assert_eq!(
             parse_client_first("n,,n,r=abc").unwrap_err(),
             Error::Protocol(Kind::ExpectedField(Field::Authcid))
+        );
+    }
+
+    #[test]
+    fn test_parse_client_first_with_channel_binding() {
+        // Valid channel binding with tls-unique
+        let (authcid, authzid, nonce, cb) =
+            parse_client_first("p=tls-unique,,n=user,r=abcdefghijk").unwrap();
+        assert_eq!(authcid, "user");
+        assert!(authzid.is_none());
+        assert_eq!(nonce, "abcdefghijk");
+        assert_eq!(
+            cb,
+            ChannelBinding::Used("tls-unique".to_string(), Vec::new())
+        );
+
+        // Valid channel binding with tls-server-end-point and authzid
+        let (authcid, authzid, nonce, cb) =
+            parse_client_first("p=tls-server-end-point,a=admin,n=user,r=xyz123").unwrap();
+        assert_eq!(authcid, "user");
+        assert_eq!(authzid, Some("admin"));
+        assert_eq!(nonce, "xyz123");
+        assert_eq!(
+            cb,
+            ChannelBinding::Used("tls-server-end-point".to_string(), Vec::new())
         );
     }
 

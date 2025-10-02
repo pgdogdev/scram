@@ -1,15 +1,16 @@
 # Salted Challenge Response Authentication Mechanism (SCRAM)
 
 This implementation provides a client and a server for the SCRAM-SHA-256 mechanism according to
-RFC5802 and RFC7677. It doesn't support channel-binding.
+RFC5802 and RFC7677. The server implementation supports channel-binding for enhanced security
+over TLS connections.
 
 [Read the documentation.](https://docs.rs/scram)
 
 # Limitations
 
-The mandatory SCRAM-SHA-1 authentication mechanism is currently not implemented. This is also true
-for the *-PLUS variants, because channel-binding is not supported by this library. If you like to
-contribute or maintain them I appreciate that.
+The mandatory SCRAM-SHA-1 authentication mechanism is currently not implemented. The client does not
+yet support channel-binding (only the server supports it). If you like to contribute or maintain
+these features I appreciate that.
 
 # Usage
 
@@ -123,4 +124,46 @@ send(&server_final);
 
 // Check if the client successfully authenticated
 assert_eq!(status, AuthenticationStatus::Authenticated);
+```
+
+## Channel Binding
+
+The server implementation supports channel binding, which cryptographically binds the SCRAM
+authentication to the underlying TLS connection. This prevents man-in-the-middle attacks even if
+the attacker has a valid TLS certificate.
+
+To use channel binding, obtain the channel binding data from your TLS implementation and create
+the server with `ScramServer::new_with_channel_binding`:
+
+```rust
+use scram::{ScramServer, AuthenticationProvider, PasswordInfo};
+
+struct ExampleProvider;
+impl AuthenticationProvider for ExampleProvider {
+    fn get_password_for(&self, username: &str) -> Option<PasswordInfo> {
+       unimplemented!()
+    }
+}
+
+// Get channel binding data from your TLS implementation
+let cb_type = "tls-unique".to_string();
+let cb_data = get_tls_channel_binding_data(); // From your TLS library
+
+// Create server with channel binding
+let scram_server = ScramServer::new_with_channel_binding(
+    ExampleProvider{},
+    cb_type,
+    cb_data
+);
+```
+
+Common channel binding types:
+- `tls-unique`: Uses the TLS Finished message (most common)
+- `tls-server-end-point`: Uses a hash of the server's TLS certificate
+- `tls-exporter`: Uses the TLS exporter functionality (RFC 5705)
+
+When channel binding is configured, the server will:
+1. Accept only clients that use the same channel binding type
+2. Validate that the channel binding data from the client matches the server's TLS connection
+3. Reject clients that don't support channel binding (for security)
 ```

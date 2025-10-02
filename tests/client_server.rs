@@ -1,3 +1,4 @@
+extern crate base64;
 extern crate rand;
 extern crate ring;
 extern crate scram;
@@ -186,4 +187,81 @@ fn test_empty_password() {
 
     assert_eq!(status, AuthenticationStatus::NotAuthenticated);
     assert!(scram_client.handle_server_final(&server_final).is_err());
+}
+
+#[test]
+fn test_channel_binding_success() {
+    // Simulate TLS channel binding data
+    let cb_data = b"channel-binding-data-from-tls".to_vec();
+
+    // Create server with channel binding
+    let scram_server = ScramServer::new_with_channel_binding(
+        TestProvider::new(),
+        "tls-unique".to_string(),
+        cb_data,
+    );
+
+    // Manually construct a client first message with channel binding
+    let client_first = "p=tls-unique,,n=user,r=clientnonce12345678901";
+
+    let scram_server = scram_server.handle_client_first(client_first).unwrap();
+    let (_scram_server, server_first) = scram_server.server_first();
+
+    // Verify server_first looks correct
+    assert!(server_first.starts_with("r=clientnonce"));
+
+    // This test verifies that the server accepts channel binding in the protocol negotiation.
+    // A full end-to-end test would require implementing a client that supports channel binding,
+    // which is beyond the scope of this test. The important part is that the server can:
+    // 1. Parse the channel binding request from the client
+    // 2. Generate a proper server response
+    // 3. Be ready to validate the channel binding data in the client-final message
+}
+
+#[test]
+fn test_channel_binding_type_mismatch() {
+    let cb_data = b"channel-binding-data".to_vec();
+
+    // Server expects tls-unique
+    let scram_server = ScramServer::new_with_channel_binding(
+        TestProvider::new(),
+        "tls-unique".to_string(),
+        cb_data,
+    );
+
+    // Client sends tls-server-end-point
+    let client_first = "p=tls-server-end-point,,n=user,r=clientnonce";
+
+    // Should fail due to channel binding type mismatch
+    assert!(scram_server.handle_client_first(client_first).is_err());
+}
+
+#[test]
+fn test_channel_binding_client_not_supporting() {
+    let cb_data = b"channel-binding-data".to_vec();
+
+    // Server expects channel binding
+    let scram_server = ScramServer::new_with_channel_binding(
+        TestProvider::new(),
+        "tls-unique".to_string(),
+        cb_data,
+    );
+
+    // Client doesn't support channel binding (sends "n")
+    let client_first = "n,,n=user,r=clientnonce";
+
+    // Should fail because server requires channel binding but client doesn't support it
+    assert!(scram_server.handle_client_first(client_first).is_err());
+}
+
+#[test]
+fn test_channel_binding_server_not_supporting() {
+    // Server doesn't support channel binding
+    let scram_server = ScramServer::new(TestProvider::new());
+
+    // Client wants to use channel binding
+    let client_first = "p=tls-unique,,n=user,r=clientnonce";
+
+    // Should fail because client wants channel binding but server doesn't support it
+    assert!(scram_server.handle_client_first(client_first).is_err());
 }
