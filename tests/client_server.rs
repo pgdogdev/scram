@@ -47,6 +47,90 @@ impl server::AuthenticationProvider for TestProvider {
     }
 }
 
+struct MultiPasswordProvider {
+    hashes: Vec<Vec<u8>>,
+    salt: Vec<u8>,
+    iterations: u16,
+}
+
+impl MultiPasswordProvider {
+    fn new(passwords: &[&str], salt: &[u8], iterations: u16) -> Self {
+        let iter_nz = NonZeroU32::new(iterations as u32).unwrap();
+        let hashes = passwords
+            .iter()
+            .map(|p| hash_password(p, iter_nz, salt).to_vec())
+            .collect();
+        Self {
+            hashes,
+            salt: salt.to_vec(),
+            iterations,
+        }
+    }
+}
+
+impl server::AuthenticationProvider for MultiPasswordProvider {
+    fn get_password_for(&self, _username: &str) -> Option<server::PasswordInfo> {
+        Some(server::PasswordInfo::new_multi(
+            self.hashes.clone(),
+            self.iterations,
+            self.salt.clone(),
+        ))
+    }
+}
+
+fn run_handshake(client_password: &str, provider: MultiPasswordProvider) -> AuthenticationStatus {
+    let scram_client = ScramClient::new("user", client_password, None);
+    let scram_server = ScramServer::new(provider);
+
+    let (scram_client, client_first) = scram_client.client_first();
+    let scram_server = scram_server.handle_client_first(&client_first).unwrap();
+    let (scram_server, server_first) = scram_server.server_first();
+    let scram_client = scram_client.handle_server_first(&server_first).unwrap();
+    let (scram_client, client_final) = scram_client.client_final();
+    let scram_server = scram_server.handle_client_final(&client_final).unwrap();
+    let (status, server_final) = scram_server.server_final();
+    if status == AuthenticationStatus::Authenticated {
+        scram_client.handle_server_final(&server_final).unwrap();
+    }
+    status
+}
+
+#[test]
+fn test_multi_password_first_matches() {
+    let provider = MultiPasswordProvider::new(&["alpha", "beta", "gamma"], b"salty", 4096);
+    assert_eq!(
+        run_handshake("alpha", provider),
+        AuthenticationStatus::Authenticated
+    );
+}
+
+#[test]
+fn test_multi_password_middle_matches() {
+    let provider = MultiPasswordProvider::new(&["alpha", "beta", "gamma"], b"salty", 4096);
+    assert_eq!(
+        run_handshake("beta", provider),
+        AuthenticationStatus::Authenticated
+    );
+}
+
+#[test]
+fn test_multi_password_last_matches() {
+    let provider = MultiPasswordProvider::new(&["alpha", "beta", "gamma"], b"salty", 4096);
+    assert_eq!(
+        run_handshake("gamma", provider),
+        AuthenticationStatus::Authenticated
+    );
+}
+
+#[test]
+fn test_multi_password_none_match() {
+    let provider = MultiPasswordProvider::new(&["alpha", "beta", "gamma"], b"salty", 4096);
+    assert_eq!(
+        run_handshake("delta", provider),
+        AuthenticationStatus::NotAuthenticated
+    );
+}
+
 #[test]
 fn test_simple_success() {
     let scram_client = ScramClient::new("user", "password", None);
