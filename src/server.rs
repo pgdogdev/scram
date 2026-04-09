@@ -31,10 +31,16 @@ pub struct ScramServer<P: AuthenticationProvider> {
     channel_binding: Option<(String, Vec<u8>)>,
 }
 
-/// Contains information about stored passwords. In particular, it stores the password that has been
-/// salted and hashed, the salt that was used, and the number of iterations of the hashing algorithm
+/// Contains information about stored passwords. In particular, it stores one or more salted and
+/// hashed passwords, the salt that was used, and the number of iterations of the hashing algorithm.
+///
+/// Multiple hashed passwords (e.g. when a user has multiple valid credentials) can be supplied via
+/// [`PasswordInfo::new_multi`]. All hashed passwords MUST share the same salt and iteration count,
+/// because the SCRAM `server-first-message` commits the server to a single salt + iteration count
+/// for the rest of the handshake. The verification step will accept a client proof that matches
+/// any of the supplied hashed passwords.
 pub struct PasswordInfo {
-    hashed_password: Vec<u8>,
+    hashed_passwords: Vec<Vec<u8>>,
     salt: Vec<u8>,
     iterations: u16,
 }
@@ -56,7 +62,18 @@ impl PasswordInfo {
     /// already been hashed using the given salt and iterations.
     pub fn new(hashed_password: Vec<u8>, iterations: u16, salt: Vec<u8>) -> Self {
         PasswordInfo {
-            hashed_password,
+            hashed_passwords: vec![hashed_password],
+            iterations,
+            salt,
+        }
+    }
+
+    /// Create a new `PasswordInfo` from multiple alternative hashed passwords. All hashed
+    /// passwords MUST be derived from the same `salt` and `iterations`. During verification, a
+    /// client proof matching any of the supplied hashes will be accepted.
+    pub fn new_multi(hashed_passwords: Vec<Vec<u8>>, iterations: u16, salt: Vec<u8>) -> Self {
+        PasswordInfo {
+            hashed_passwords,
             iterations,
             salt,
         }
@@ -288,7 +305,7 @@ impl<'a, P: AuthenticationProvider> ServerFirst<'a, P> {
         .into();
         (
             ClientFinal {
-                hashed_password: self.password_info.hashed_password,
+                hashed_passwords: self.password_info.hashed_passwords,
                 nonce,
                 gs2header,
                 client_first_bare,
@@ -306,7 +323,7 @@ impl<'a, P: AuthenticationProvider> ServerFirst<'a, P> {
 /// Represents the stage after the server has generated its first response to the client. This
 /// struct is responsible for handling the client's final message.
 pub struct ClientFinal<'a, P: 'a + AuthenticationProvider> {
-    hashed_password: Vec<u8>,
+    hashed_passwords: Vec<Vec<u8>>,
     nonce: String,
     gs2header: Cow<'static, str>,
     client_first_bare: Cow<'static, str>,
@@ -416,26 +433,32 @@ impl<'a, P: AuthenticationProvider> ClientFinal<'a, P> {
         nonce == self.nonce
     }
 
-    /// Checks that the proof from the client matches our saved credentials
+    /// Checks that the proof from the client matches any of our saved credentials. Returns the
+    /// server signature derived from the matching credential, or `None` if none matched.
     fn verify_proof(&self, proof: &str) -> Result<Option<String>, Error> {
-        let (client_proof, server_signature): ([u8; SHA256_OUTPUT_LEN], hmac::Tag) = find_proofs(
-            &self.gs2header,
-            &self.client_first_bare,
-            &self.server_first,
-            self.hashed_password.as_slice(),
-            &self.nonce,
-        );
         let proof = if let Ok(proof) = base64::decode(proof.as_bytes()) {
             proof
         } else {
             return Err(Error::Protocol(Kind::InvalidField(Field::Proof)));
         };
-        if proof != client_proof {
-            return Ok(None);
+
+        for hashed_password in &self.hashed_passwords {
+            let (client_proof, server_signature): ([u8; SHA256_OUTPUT_LEN], hmac::Tag) =
+                find_proofs(
+                    &self.gs2header,
+                    &self.client_first_bare,
+                    &self.server_first,
+                    hashed_password.as_slice(),
+                    &self.nonce,
+                );
+            if proof == client_proof {
+                let server_signature_string =
+                    format!("v={}", base64::encode(server_signature.as_ref()));
+                return Ok(Some(server_signature_string));
+            }
         }
 
-        let server_signature_string = format!("v={}", base64::encode(server_signature.as_ref()));
-        Ok(Some(server_signature_string))
+        Ok(None)
     }
 }
 
