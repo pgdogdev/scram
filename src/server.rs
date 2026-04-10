@@ -147,7 +147,7 @@ fn parse_client_first(data: &str) -> Result<(&str, Option<&str>, &str, ChannelBi
 
     // Nonce
     let nonce = match parts.next() {
-        Some(part) if &part.as_bytes()[..2] == b"r=" => &part[2..],
+        Some(part) if part.len() >= 2 && &part.as_bytes()[..2] == b"r=" => &part[2..],
         _ => {
             return Err(Error::Protocol(Kind::ExpectedField(Field::Nonce)));
         }
