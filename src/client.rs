@@ -24,7 +24,7 @@ fn parse_server_first(data: &str) -> Result<(&str, Vec<u8>, NonZeroU32), Error> 
     }
     let mut parts = data.split(',').peekable();
     match parts.peek() {
-        Some(part) if &part.as_bytes()[..2] == b"m=" => {
+        Some(part) if part.len() >= 2 && &part.as_bytes()[..2] == b"m=" => {
             return Err(Error::UnsupportedExtension);
         }
         Some(_) => {}
@@ -33,20 +33,22 @@ fn parse_server_first(data: &str) -> Result<(&str, Vec<u8>, NonZeroU32), Error> 
         }
     }
     let nonce = match parts.next() {
-        Some(part) if &part.as_bytes()[..2] == b"r=" => &part[2..],
+        Some(part) if part.len() >= 2 && &part.as_bytes()[..2] == b"r=" => &part[2..],
         _ => {
             return Err(Error::Protocol(Kind::ExpectedField(Field::Nonce)));
         }
     };
     let salt = match parts.next() {
-        Some(part) if &part.as_bytes()[..2] == b"s=" => base64::decode(part[2..].as_bytes())
-            .map_err(|_| Error::Protocol(Kind::InvalidField(Field::Salt)))?,
+        Some(part) if part.len() >= 2 && &part.as_bytes()[..2] == b"s=" => {
+            base64::decode(part[2..].as_bytes())
+                .map_err(|_| Error::Protocol(Kind::InvalidField(Field::Salt)))?
+        }
         _ => {
             return Err(Error::Protocol(Kind::ExpectedField(Field::Salt)));
         }
     };
     let iterations = match parts.next() {
-        Some(part) if &part.as_bytes()[..2] == b"i=" => part[2..]
+        Some(part) if part.len() >= 2 && &part.as_bytes()[..2] == b"i=" => part[2..]
             .parse()
             .map_err(|_| Error::Protocol(Kind::InvalidField(Field::Iterations)))?,
         _ => {
