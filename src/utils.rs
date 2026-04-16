@@ -43,6 +43,62 @@ pub fn hash_password(
     salted_password
 }
 
+/// Verifies a client proof using pre-computed StoredKey and ServerKey (as stored in pg_shadow).
+///
+/// Unlike [`find_proofs`] which derives keys from the SaltedPassword, this function works
+/// directly with the StoredKey and ServerKey from a `SCRAM-SHA-256$iter:salt$StoredKey:ServerKey`
+/// hash. Returns `(valid, server_signature)`.
+pub fn verify_proof_from_stored_keys(
+    gs2header: &str,
+    client_first_bare: &str,
+    server_first: &str,
+    stored_key: &[u8],
+    server_key: &[u8],
+    nonce: &str,
+    client_proof: &[u8],
+) -> (bool, hmac::Tag) {
+    fn sign_slice(key: &Key, slice: &[&[u8]]) -> hmac::Tag {
+        let mut signature_context = Context::with_key(key);
+        for item in slice {
+            signature_context.update(item);
+        }
+        signature_context.sign()
+    }
+
+    let client_final_without_proof =
+        format!("c={},r={}", base64::encode(gs2header.as_bytes()), nonce);
+    let auth_message = [
+        client_first_bare.as_bytes(),
+        b",",
+        server_first.as_bytes(),
+        b",",
+        client_final_without_proof.as_bytes(),
+    ];
+
+    // ClientSignature = HMAC(StoredKey, auth_message)
+    let stored_key_signing_key = Key::new(HMAC_SHA256, stored_key);
+    let client_signature = sign_slice(&stored_key_signing_key, &auth_message);
+
+    // RecoveredClientKey = ClientProof XOR ClientSignature
+    let mut recovered_client_key = [0u8; SHA256_OUTPUT_LEN];
+    for (out, (p, s)) in recovered_client_key
+        .iter_mut()
+        .zip(client_proof.iter().zip(client_signature.as_ref()))
+    {
+        *out = p ^ s;
+    }
+
+    // Verify: SHA256(RecoveredClientKey) == StoredKey
+    let computed_stored_key = digest(&digest::SHA256, &recovered_client_key);
+    let valid = computed_stored_key.as_ref() == stored_key;
+
+    // ServerSignature = HMAC(ServerKey, auth_message)
+    let server_key_signing_key = Key::new(HMAC_SHA256, server_key);
+    let server_signature = sign_slice(&server_key_signing_key, &auth_message);
+
+    (valid, server_signature)
+}
+
 /// Finds the client proof and server signature based on the shared hashed key.
 pub fn find_proofs(
     gs2header: &str,
