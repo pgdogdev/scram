@@ -349,3 +349,87 @@ fn test_channel_binding_server_not_supporting() {
     // Should fail because client wants channel binding but server doesn't support it
     assert!(scram_server.handle_client_first(client_first).is_err());
 }
+
+/// Provider that returns stored keys parsed from a pg_shadow-style SCRAM hash.
+struct StoredKeyProvider {
+    stored_key: Vec<u8>,
+    server_key: Vec<u8>,
+    salt: Vec<u8>,
+    iterations: u16,
+}
+
+impl StoredKeyProvider {
+    /// Parse a `SCRAM-SHA-256$iter:salt$StoredKey:ServerKey` string.
+    fn from_scram_hash(hash: &str) -> Self {
+        let mut parts = hash.split('$');
+        assert_eq!(parts.next().unwrap(), "SCRAM-SHA-256");
+        let iter_salt = parts.next().unwrap();
+        let keys = parts.next().unwrap();
+
+        let mut is = iter_salt.split(':');
+        let iterations: u16 = is.next().unwrap().parse().unwrap();
+        let salt = base64::decode(is.next().unwrap()).unwrap();
+
+        let mut ks = keys.split(':');
+        let stored_key = base64::decode(ks.next().unwrap()).unwrap();
+        let server_key = base64::decode(ks.next().unwrap()).unwrap();
+
+        Self {
+            stored_key,
+            server_key,
+            salt,
+            iterations,
+        }
+    }
+}
+
+impl server::AuthenticationProvider for StoredKeyProvider {
+    fn get_password_for(&self, _username: &str) -> Option<server::PasswordInfo> {
+        Some(server::PasswordInfo::from_stored_keys(
+            self.stored_key.clone(),
+            self.server_key.clone(),
+            self.iterations,
+            self.salt.clone(),
+        ))
+    }
+}
+
+#[test]
+fn test_stored_keys_correct_password() {
+    let provider = StoredKeyProvider::from_scram_hash(
+        "SCRAM-SHA-256$4096:B6lJyg12n6SawAu1kD9maA==$huWaU6t+WsvcS9ZrDvocZeYtlLJ60hdP46tjszFBbW0=:706OTwYyqH5WpfNpZdgt0gxuP5ff4DPUpHYu3F3w6TY=",
+    );
+    let scram_client = ScramClient::new("user", "pgdog", None);
+    let scram_server = ScramServer::new(provider);
+
+    let (scram_client, client_first) = scram_client.client_first();
+    let scram_server = scram_server.handle_client_first(&client_first).unwrap();
+    let (scram_server, server_first) = scram_server.server_first();
+    let scram_client = scram_client.handle_server_first(&server_first).unwrap();
+    let (scram_client, client_final) = scram_client.client_final();
+    let scram_server = scram_server.handle_client_final(&client_final).unwrap();
+    let (status, server_final) = scram_server.server_final();
+
+    assert_eq!(status, AuthenticationStatus::Authenticated);
+    scram_client.handle_server_final(&server_final).unwrap();
+}
+
+#[test]
+fn test_stored_keys_wrong_password() {
+    let provider = StoredKeyProvider::from_scram_hash(
+        "SCRAM-SHA-256$4096:B6lJyg12n6SawAu1kD9maA==$huWaU6t+WsvcS9ZrDvocZeYtlLJ60hdP46tjszFBbW0=:706OTwYyqH5WpfNpZdgt0gxuP5ff4DPUpHYu3F3w6TY=",
+    );
+    let scram_client = ScramClient::new("user", "wrongpassword", None);
+    let scram_server = ScramServer::new(provider);
+
+    let (scram_client, client_first) = scram_client.client_first();
+    let scram_server = scram_server.handle_client_first(&client_first).unwrap();
+    let (scram_server, server_first) = scram_server.server_first();
+    let scram_client = scram_client.handle_server_first(&server_first).unwrap();
+    let (scram_client, client_final) = scram_client.client_final();
+    let scram_server = scram_server.handle_client_final(&client_final).unwrap();
+    let (status, server_final) = scram_server.server_final();
+
+    assert_eq!(status, AuthenticationStatus::NotAuthenticated);
+    assert!(scram_client.handle_server_final(&server_final).is_err());
+}

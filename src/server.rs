@@ -7,7 +7,7 @@ use ring::digest::SHA256_OUTPUT_LEN;
 use ring::hmac;
 
 use error::{Error, Field, Kind};
-use utils::find_proofs;
+use utils::{find_proofs, verify_proof_from_stored_keys};
 use NONCE_LENGTH;
 
 /// Represents channel binding information from a client
@@ -41,6 +41,8 @@ pub struct ScramServer<P: AuthenticationProvider> {
 /// any of the supplied hashed passwords.
 pub struct PasswordInfo {
     hashed_passwords: Vec<Vec<u8>>,
+    /// Pre-computed (StoredKey, ServerKey) for verification from a stored SCRAM hash.
+    stored_keys: Option<(Vec<u8>, Vec<u8>)>,
     salt: Vec<u8>,
     iterations: u16,
 }
@@ -63,6 +65,7 @@ impl PasswordInfo {
     pub fn new(hashed_password: Vec<u8>, iterations: u16, salt: Vec<u8>) -> Self {
         PasswordInfo {
             hashed_passwords: vec![hashed_password],
+            stored_keys: None,
             iterations,
             salt,
         }
@@ -74,6 +77,23 @@ impl PasswordInfo {
     pub fn new_multi(hashed_passwords: Vec<Vec<u8>>, iterations: u16, salt: Vec<u8>) -> Self {
         PasswordInfo {
             hashed_passwords,
+            stored_keys: None,
+            iterations,
+            salt,
+        }
+    }
+
+    /// Create a new `PasswordInfo` from pre-computed StoredKey and ServerKey, as found in a
+    /// `SCRAM-SHA-256$iterations:salt$StoredKey:ServerKey` hash (e.g. from `pg_shadow`).
+    pub fn from_stored_keys(
+        stored_key: Vec<u8>,
+        server_key: Vec<u8>,
+        iterations: u16,
+        salt: Vec<u8>,
+    ) -> Self {
+        PasswordInfo {
+            hashed_passwords: vec![],
+            stored_keys: Some((stored_key, server_key)),
             iterations,
             salt,
         }
@@ -306,6 +326,7 @@ impl<'a, P: AuthenticationProvider> ServerFirst<'a, P> {
         (
             ClientFinal {
                 hashed_passwords: self.password_info.hashed_passwords,
+                stored_keys: self.password_info.stored_keys,
                 nonce,
                 gs2header,
                 client_first_bare,
@@ -324,6 +345,7 @@ impl<'a, P: AuthenticationProvider> ServerFirst<'a, P> {
 /// struct is responsible for handling the client's final message.
 pub struct ClientFinal<'a, P: 'a + AuthenticationProvider> {
     hashed_passwords: Vec<Vec<u8>>,
+    stored_keys: Option<(Vec<u8>, Vec<u8>)>,
     nonce: String,
     gs2header: Cow<'static, str>,
     client_first_bare: Cow<'static, str>,
@@ -442,6 +464,26 @@ impl<'a, P: AuthenticationProvider> ClientFinal<'a, P> {
             return Err(Error::Protocol(Kind::InvalidField(Field::Proof)));
         };
 
+        // Fast path: verify using pre-computed StoredKey + ServerKey from a stored SCRAM hash.
+        if let Some((stored_key, server_key)) = &self.stored_keys {
+            let (valid, server_signature) = verify_proof_from_stored_keys(
+                &self.gs2header,
+                &self.client_first_bare,
+                &self.server_first,
+                stored_key,
+                server_key,
+                &self.nonce,
+                &proof,
+            );
+            if valid {
+                let server_signature_string =
+                    format!("v={}", base64::encode(server_signature.as_ref()));
+                return Ok(Some(server_signature_string));
+            }
+            return Ok(None);
+        }
+
+        // Fallback: derive keys from SaltedPassword(s).
         for hashed_password in &self.hashed_passwords {
             let (client_proof, server_signature): ([u8; SHA256_OUTPUT_LEN], hmac::Tag) =
                 find_proofs(
