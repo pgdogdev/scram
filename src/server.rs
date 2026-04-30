@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 
+use aws_lc_rs::digest::SHA256_OUTPUT_LEN;
+use aws_lc_rs::hmac;
 use base64;
 use rand::distributions::{Distribution, Uniform};
 use rand::{rngs::OsRng, Rng};
-use ring::digest::SHA256_OUTPUT_LEN;
-use ring::hmac;
 
 use error::{Error, Field, Kind};
 use utils::{find_proofs, verify_proof_from_stored_keys};
