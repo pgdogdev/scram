@@ -162,9 +162,9 @@
 //!     cb_data
 //! );
 //! ```
+extern crate aws_lc_rs;
 extern crate base64;
 extern crate rand;
-extern crate ring;
 
 /// The length of the client nonce in characters/bytes.
 const NONCE_LENGTH: usize = 24;

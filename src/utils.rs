@@ -1,7 +1,7 @@
+use aws_lc_rs::digest::{self, digest, SHA256_OUTPUT_LEN};
+use aws_lc_rs::hmac::{self, Context, Key, HMAC_SHA256};
+use aws_lc_rs::pbkdf2::{self, PBKDF2_HMAC_SHA256 as SHA256};
 use base64;
-use ring::digest::{self, digest, SHA256_OUTPUT_LEN};
-use ring::hmac::{self, Context, Key, HMAC_SHA256};
-use ring::pbkdf2::{self, PBKDF2_HMAC_SHA256 as SHA256};
 use std::num::NonZeroU32;
 
 /// Parses a part of a SCRAM message, after it has been split on commas.

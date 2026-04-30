@@ -1,9 +1,9 @@
+extern crate aws_lc_rs;
 extern crate base64;
 extern crate rand;
-extern crate ring;
 extern crate scram;
 
-use ring::digest::SHA256_OUTPUT_LEN;
+use aws_lc_rs::digest::SHA256_OUTPUT_LEN;
 use scram::*;
 use std::num::NonZeroU32;
 

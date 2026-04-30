@@ -10,9 +10,9 @@ repository = "https://github.com/tomprogrammer/scram"
 version = "0.6.0"
 
 [dependencies]
+aws-lc-rs = "1.16.3"
 base64 = "0.13.0"
 rand = "0.8.0"
-ring = "0.16.9"
 
 [badges]
 maintenance = { status = "actively-developed" }
