@@ -273,33 +273,102 @@ fn test_empty_password() {
     assert!(scram_client.handle_server_final(&server_final).is_err());
 }
 
+fn plus_handshake(
+    password: &str,
+    cb_type: &str,
+    client_cb: Vec<u8>,
+    server_cb: Vec<u8>,
+) -> AuthenticationStatus {
+    let scram_client =
+        ScramClient::new_with_channel_binding("user", password, None, cb_type, client_cb);
+    let scram_server =
+        ScramServer::new_with_channel_binding(TestProvider::new(), cb_type.to_string(), server_cb);
+
+    let (scram_client, client_first) = scram_client.client_first();
+    assert!(
+        client_first.starts_with(&format!("p={},,", cb_type)),
+        "PLUS client-first must use the p= GS2 flag"
+    );
+
+    let scram_server = scram_server.handle_client_first(&client_first).unwrap();
+    let (scram_server, server_first) = scram_server.server_first();
+
+    let scram_client = scram_client.handle_server_first(&server_first).unwrap();
+    let (scram_client, client_final) = scram_client.client_final();
+
+    let scram_server = scram_server.handle_client_final(&client_final).unwrap();
+    let (status, server_final) = scram_server.server_final();
+
+    if status == AuthenticationStatus::Authenticated {
+        scram_client.handle_server_final(&server_final).unwrap();
+    }
+    status
+}
+
 #[test]
 fn test_channel_binding_success() {
-    // Simulate TLS channel binding data
     let cb_data = b"channel-binding-data-from-tls".to_vec();
+    assert_eq!(
+        plus_handshake("password", "tls-server-end-point", cb_data.clone(), cb_data),
+        AuthenticationStatus::Authenticated
+    );
+}
 
-    // Create server with channel binding
+#[test]
+fn test_channel_binding_wrong_data() {
+    let client_cb = b"channel-binding-data-from-tls".to_vec();
+    let server_cb = b"different-binding-data".to_vec();
+    let scram_client = ScramClient::new_with_channel_binding(
+        "user",
+        "password",
+        None,
+        "tls-server-end-point",
+        client_cb,
+    );
     let scram_server = ScramServer::new_with_channel_binding(
         TestProvider::new(),
-        "tls-unique".to_string(),
+        "tls-server-end-point".to_string(),
+        server_cb,
+    );
+
+    let (scram_client, client_first) = scram_client.client_first();
+    let scram_server = scram_server.handle_client_first(&client_first).unwrap();
+    let (scram_server, server_first) = scram_server.server_first();
+    let scram_client = scram_client.handle_server_first(&server_first).unwrap();
+    let (_scram_client, client_final) = scram_client.client_final();
+
+    assert!(
+        scram_server.handle_client_final(&client_final).is_err(),
+        "mismatched channel-binding data must fail the handshake"
+    );
+}
+
+#[test]
+fn test_channel_binding_wrong_password() {
+    let cb_data = b"channel-binding-data-from-tls".to_vec();
+    assert_eq!(
+        plus_handshake(
+            "badpassword",
+            "tls-server-end-point",
+            cb_data.clone(),
+            cb_data
+        ),
+        AuthenticationStatus::NotAuthenticated
+    );
+}
+
+#[test]
+fn test_channel_binding_y_flag_rejected() {
+    let cb_data = b"channel-binding-data".to_vec();
+    let scram_server = ScramServer::new_with_channel_binding(
+        TestProvider::new(),
+        "tls-server-end-point".to_string(),
         cb_data,
     );
 
-    // Manually construct a client first message with channel binding
-    let client_first = "p=tls-unique,,n=user,r=clientnonce12345678901";
-
-    let scram_server = scram_server.handle_client_first(client_first).unwrap();
-    let (_scram_server, server_first) = scram_server.server_first();
-
-    // Verify server_first looks correct
-    assert!(server_first.starts_with("r=clientnonce"));
-
-    // This test verifies that the server accepts channel binding in the protocol negotiation.
-    // A full end-to-end test would require implementing a client that supports channel binding,
-    // which is beyond the scope of this test. The important part is that the server can:
-    // 1. Parse the channel binding request from the client
-    // 2. Generate a proper server response
-    // 3. Be ready to validate the channel binding data in the client-final message
+    // RFC 5802: client sent `y` but the server does support channel binding.
+    let client_first = "y,,n=user,r=clientnonce";
+    assert!(scram_server.handle_client_first(client_first).is_err());
 }
 
 #[test]
@@ -432,4 +501,35 @@ fn test_stored_keys_wrong_password() {
 
     assert_eq!(status, AuthenticationStatus::NotAuthenticated);
     assert!(scram_client.handle_server_final(&server_final).is_err());
+}
+
+#[test]
+fn test_stored_keys_with_channel_binding() {
+    let provider = StoredKeyProvider::from_scram_hash(
+        "SCRAM-SHA-256$4096:B6lJyg12n6SawAu1kD9maA==$huWaU6t+WsvcS9ZrDvocZeYtlLJ60hdP46tjszFBbW0=:706OTwYyqH5WpfNpZdgt0gxuP5ff4DPUpHYu3F3w6TY=",
+    );
+    let cb_data = b"tls-server-end-point-bytes".to_vec();
+    let scram_client = ScramClient::new_with_channel_binding(
+        "user",
+        "pgdog",
+        None,
+        "tls-server-end-point",
+        cb_data.clone(),
+    );
+    let scram_server = ScramServer::new_with_channel_binding(
+        provider,
+        "tls-server-end-point".to_string(),
+        cb_data,
+    );
+
+    let (scram_client, client_first) = scram_client.client_first();
+    let scram_server = scram_server.handle_client_first(&client_first).unwrap();
+    let (scram_server, server_first) = scram_server.server_first();
+    let scram_client = scram_client.handle_server_first(&server_first).unwrap();
+    let (scram_client, client_final) = scram_client.client_final();
+    let scram_server = scram_server.handle_client_final(&client_final).unwrap();
+    let (status, server_final) = scram_server.server_final();
+
+    assert_eq!(status, AuthenticationStatus::Authenticated);
+    scram_client.handle_server_final(&server_final).unwrap();
 }

@@ -8,7 +8,7 @@ use rand::distributions::{Distribution, Uniform};
 use rand::{rngs::OsRng, Rng};
 
 use error::{Error, Field, Kind};
-use utils::{find_proofs, hash_password};
+use utils::{cbind_input, find_proofs, hash_password};
 use NONCE_LENGTH;
 
 #[deprecated(
@@ -77,6 +77,7 @@ pub struct ScramClient<'a> {
     password: &'a str,
     nonce: String,
     authcid: &'a str,
+    cbind_data: Vec<u8>,
 }
 
 impl<'a> ScramClient<'a> {
@@ -129,6 +130,50 @@ impl<'a> ScramClient<'a> {
             password,
             authcid,
             nonce,
+            cbind_data: Vec::new(),
+        }
+    }
+
+    /// Constructs a client that uses channel binding (SCRAM-SHA-256-PLUS).
+    ///
+    /// `cb_type` is the GS2 channel-binding name (e.g. `tls-server-end-point`)
+    /// and `cb_data` is the corresponding binding data from the TLS connection.
+    /// The `c=` attribute of the client-final message is then
+    /// `base64(gs2-header || cb_data)` as required by RFC 5802.
+    pub fn new_with_channel_binding(
+        authcid: &'a str,
+        password: &'a str,
+        authzid: Option<&'a str>,
+        cb_type: &str,
+        cb_data: Vec<u8>,
+    ) -> Self {
+        Self::with_rng_and_channel_binding(authcid, password, authzid, cb_type, cb_data, &mut OsRng)
+    }
+
+    /// [`new_with_channel_binding`](Self::new_with_channel_binding) with a custom RNG.
+    pub fn with_rng_and_channel_binding<R: Rng + ?Sized>(
+        authcid: &'a str,
+        password: &'a str,
+        authzid: Option<&'a str>,
+        cb_type: &str,
+        cb_data: Vec<u8>,
+        rng: &mut R,
+    ) -> Self {
+        let gs2header: Cow<'static, str> = match authzid {
+            Some(authzid) => format!("p={},a={},", cb_type, authzid).into(),
+            None => format!("p={},,", cb_type).into(),
+        };
+        let nonce: String = Uniform::from(33..125)
+            .sample_iter(rng)
+            .map(|x: u8| if x > 43 { (x + 1) as char } else { x as char })
+            .take(NONCE_LENGTH)
+            .collect();
+        ScramClient {
+            gs2header,
+            password,
+            authcid,
+            nonce,
+            cbind_data: cb_data,
         }
     }
 
@@ -149,6 +194,7 @@ impl<'a> ScramClient<'a> {
             password: self.password,
             client_nonce: self.nonce,
             client_first_bare,
+            cbind_data: self.cbind_data,
         };
         (server_first, client_first)
     }
@@ -161,6 +207,7 @@ pub struct ServerFirst<'a> {
     password: &'a str,
     client_nonce: String,
     client_first_bare: String,
+    cbind_data: Vec<u8>,
 }
 
 impl<'a> ServerFirst<'a> {
@@ -181,8 +228,9 @@ impl<'a> ServerFirst<'a> {
             return Err(Error::Protocol(Kind::InvalidNonce));
         }
         let salted_password = hash_password(self.password, iterations, &salt);
+        let cbind_input = cbind_input(&self.gs2header, &self.cbind_data);
         let (client_proof, server_signature): ([u8; SHA256_OUTPUT_LEN], hmac::Tag) = find_proofs(
-            &self.gs2header,
+            &cbind_input,
             &self.client_first_bare,
             &server_first,
             &salted_password,
@@ -190,7 +238,7 @@ impl<'a> ServerFirst<'a> {
         );
         let client_final = format!(
             "c={},r={},p={}",
-            base64::encode(self.gs2header.as_bytes()),
+            base64::encode(&cbind_input),
             nonce,
             base64::encode(&client_proof)
         );

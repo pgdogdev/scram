@@ -7,7 +7,7 @@ use rand::distributions::{Distribution, Uniform};
 use rand::{rngs::OsRng, Rng};
 
 use error::{Error, Field, Kind};
-use utils::{find_proofs, verify_proof_from_stored_keys};
+use utils::{cbind_input, find_proofs, verify_proof_from_stored_keys};
 use NONCE_LENGTH;
 
 /// Represents channel binding information from a client
@@ -221,13 +221,11 @@ impl<P: AuthenticationProvider> ScramServer<P> {
                     return Err(Error::Protocol(Kind::InvalidField(Field::ChannelBinding)));
                 }
             }
-            // Server has channel binding but client doesn't support it - reject
-            (Some(_), ChannelBinding::None) => {
+            // Server requires channel binding. `n` means the client cannot do it.
+            // `y` means the client can but thinks the server cannot — RFC 5802
+            // section 6 requires the server to fail that as a downgrade.
+            (Some(_), ChannelBinding::None) | (Some(_), ChannelBinding::NotUsed) => {
                 return Err(Error::Protocol(Kind::InvalidField(Field::ChannelBinding)));
-            }
-            // Server has channel binding but client chose not to use it - allow but not ideal
-            (Some(_), ChannelBinding::NotUsed) => {
-                // This is allowed by the spec but indicates client supports CB but chose not to use it
             }
             // Server doesn't have channel binding, client wants it - reject
             (None, ChannelBinding::Used(_, _)) => {
@@ -455,6 +453,18 @@ impl<'a, P: AuthenticationProvider> ClientFinal<'a, P> {
         nonce == self.nonce
     }
 
+    /// RFC 5802 cbind-input used in the AuthMessage `c=` attribute.
+    fn cbind_input(&self) -> Vec<u8> {
+        let extra = if self.gs2header.starts_with("p=") {
+            self.server_channel_binding
+                .map(|(_, data)| data.as_slice())
+                .unwrap_or(&[])
+        } else {
+            &[]
+        };
+        cbind_input(&self.gs2header, extra)
+    }
+
     /// Checks that the proof from the client matches any of our saved credentials. Returns the
     /// server signature derived from the matching credential, or `None` if none matched.
     fn verify_proof(&self, proof: &str) -> Result<Option<String>, Error> {
@@ -464,10 +474,12 @@ impl<'a, P: AuthenticationProvider> ClientFinal<'a, P> {
             return Err(Error::Protocol(Kind::InvalidField(Field::Proof)));
         };
 
+        let cbind_input = self.cbind_input();
+
         // Fast path: verify using pre-computed StoredKey + ServerKey from a stored SCRAM hash.
         if let Some((stored_key, server_key)) = &self.stored_keys {
             let (valid, server_signature) = verify_proof_from_stored_keys(
-                &self.gs2header,
+                &cbind_input,
                 &self.client_first_bare,
                 &self.server_first,
                 stored_key,
@@ -487,7 +499,7 @@ impl<'a, P: AuthenticationProvider> ClientFinal<'a, P> {
         for hashed_password in &self.hashed_passwords {
             let (client_proof, server_signature): ([u8; SHA256_OUTPUT_LEN], hmac::Tag) =
                 find_proofs(
-                    &self.gs2header,
+                    &cbind_input,
                     &self.client_first_bare,
                     &self.server_first,
                     hashed_password.as_slice(),
