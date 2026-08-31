@@ -168,5 +168,5 @@ which is what the AuthMessage is signed over.
 When channel binding is configured, the server will:
 1. Accept only clients that use the same channel binding type
 2. Validate that the channel binding data from the client matches the server's TLS connection
-3. Reject clients that send `n` or `y` (RFC 5802 section 6)
+3. Reject clients that send `y` (RFC 5802 section 6) and clients that send `n` (this server's require-channel-binding policy)
 ```
