@@ -2,8 +2,8 @@
 //!
 //! This implementation currently provides a client and a server for the SCRAM-SHA-256 mechanism
 //! according to [RFC5802](https://tools.ietf.org/html/rfc5802) and
-//! [RFC7677](https://tools.ietf.org/html/rfc7677). The server implementation supports
-//! channel-binding for enhanced security over TLS connections.
+//! [RFC7677](https://tools.ietf.org/html/rfc7677). Both sides support channel-binding
+//! (SCRAM-SHA-256-PLUS), including `tls-server-end-point` as used by PostgreSQL.
 //!
 //! # Usage
 //!
@@ -138,6 +138,10 @@
 //! - `tls-unique`: Uses the TLS Finished message
 //! - `tls-server-end-point`: Uses the server's TLS certificate
 //! - `tls-exporter`: Uses the TLS exporter functionality (RFC 5705)
+//!
+//! Clients use [`ScramClient::new_with_channel_binding`](client::ScramClient::new_with_channel_binding)
+//! with the same type and data. The AuthMessage `c=` attribute is
+//! `base64(gs2-header || cbind-data)` as required by RFC 5802.
 //!
 //! To use channel binding, create the server with [`ScramServer::new_with_channel_binding`]:
 //!

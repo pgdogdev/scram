@@ -43,13 +43,25 @@ pub fn hash_password(
     salted_password
 }
 
+/// RFC 5802 cbind-input: the GS2 header, followed by channel-binding data
+/// when the GS2 flag is `p`.
+pub fn cbind_input(gs2header: &str, cbind_data: &[u8]) -> Vec<u8> {
+    let mut input = Vec::with_capacity(gs2header.len() + cbind_data.len());
+    input.extend_from_slice(gs2header.as_bytes());
+    input.extend_from_slice(cbind_data);
+    input
+}
+
 /// Verifies a client proof using pre-computed StoredKey and ServerKey (as stored in pg_shadow).
 ///
 /// Unlike [`find_proofs`] which derives keys from the SaltedPassword, this function works
 /// directly with the StoredKey and ServerKey from a `SCRAM-SHA-256$iter:salt$StoredKey:ServerKey`
 /// hash. Returns `(valid, server_signature)`.
+///
+/// `cbind_input` is RFC 5802 cbind-input (GS2 header plus channel-binding data
+/// when the GS2 flag is `p`).
 pub fn verify_proof_from_stored_keys(
-    gs2header: &str,
+    cbind_input: &[u8],
     client_first_bare: &str,
     server_first: &str,
     stored_key: &[u8],
@@ -65,8 +77,7 @@ pub fn verify_proof_from_stored_keys(
         signature_context.sign()
     }
 
-    let client_final_without_proof =
-        format!("c={},r={}", base64::encode(gs2header.as_bytes()), nonce);
+    let client_final_without_proof = format!("c={},r={}", base64::encode(cbind_input), nonce);
     let auth_message = [
         client_first_bare.as_bytes(),
         b",",
@@ -100,8 +111,11 @@ pub fn verify_proof_from_stored_keys(
 }
 
 /// Finds the client proof and server signature based on the shared hashed key.
+///
+/// `cbind_input` is RFC 5802 cbind-input (GS2 header plus channel-binding data
+/// when the GS2 flag is `p`).
 pub fn find_proofs(
-    gs2header: &str,
+    cbind_input: &[u8],
     client_first_bare: &str,
     server_first: &str,
     salted_password: &[u8],
@@ -115,8 +129,7 @@ pub fn find_proofs(
         signature_context.sign()
     }
 
-    let client_final_without_proof =
-        format!("c={},r={}", base64::encode(gs2header.as_bytes()), nonce);
+    let client_final_without_proof = format!("c={},r={}", base64::encode(cbind_input), nonce);
     let auth_message = [
         client_first_bare.as_bytes(),
         b",",

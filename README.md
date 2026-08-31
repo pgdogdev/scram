@@ -1,16 +1,15 @@
 # Salted Challenge Response Authentication Mechanism (SCRAM)
 
 This implementation provides a client and a server for the SCRAM-SHA-256 mechanism according to
-RFC5802 and RFC7677. The server implementation supports channel-binding for enhanced security
-over TLS connections.
+RFC5802 and RFC7677. Both sides support channel-binding (SCRAM-SHA-256-PLUS), including
+`tls-server-end-point` as used by PostgreSQL.
 
 [Read the documentation.](https://docs.rs/scram)
 
 # Limitations
 
-The mandatory SCRAM-SHA-1 authentication mechanism is currently not implemented. The client does not
-yet support channel-binding (only the server supports it). If you like to contribute or maintain
-these features I appreciate that.
+The mandatory SCRAM-SHA-1 authentication mechanism is currently not implemented. If you like to
+contribute or maintain that feature I appreciate that.
 
 # Usage
 
@@ -162,8 +161,12 @@ Common channel binding types:
 - `tls-server-end-point`: Uses a hash of the server's TLS certificate
 - `tls-exporter`: Uses the TLS exporter functionality (RFC 5705)
 
+Clients use `ScramClient::new_with_channel_binding` with the same type and data.
+The `c=` attribute of the client-final message is then `base64(gs2-header || cbind-data)`,
+which is what the AuthMessage is signed over.
+
 When channel binding is configured, the server will:
 1. Accept only clients that use the same channel binding type
 2. Validate that the channel binding data from the client matches the server's TLS connection
-3. Reject clients that don't support channel binding (for security)
+3. Reject clients that send `y` (RFC 5802 section 6) and clients that send `n` (this server's require-channel-binding policy)
 ```
